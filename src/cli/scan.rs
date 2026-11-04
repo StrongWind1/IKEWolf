@@ -263,7 +263,7 @@ fn format_text_results(result: &ScanOutput, args: &ScanArgs, start: Instant) -> 
             }
         }
 
-        if let Some(ref psk) = host.psk_hash {
+        for psk in &host.psk_hashes {
             let _ = writeln!(out, "  PSK Hash ({}):", psk.hash_type);
             let _ = writeln!(out, "    hashcat: {}", psk.hashcat_line);
             if let Some(ref warn) = psk.warning {
@@ -318,7 +318,7 @@ fn write_results(result: &ScanOutput, args: &ScanArgs, globals: &GlobalOpts, sta
     if let Some(ref path) = args.hashes {
         let mut lines = String::new();
         for host in &result.hosts {
-            if let Some(ref psk) = host.psk_hash {
+            for psk in &host.psk_hashes {
                 let _ = writeln!(lines, "{}:{}", host.target.addr, psk.hashcat_line);
             }
         }

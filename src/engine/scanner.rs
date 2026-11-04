@@ -76,7 +76,7 @@ pub(crate) struct HostResult {
     pub(crate) responded: bool,
     pub(crate) ikev1_result: Option<Ikev1HostResult>,
     pub(crate) ikev2_result: Option<Ikev2HostResult>,
-    pub(crate) psk_hash: Option<PskHashResult>,
+    pub(crate) psk_hashes: Vec<PskHashResult>,
     pub(crate) response_time_ms: Option<u64>,
 }
 
@@ -137,6 +137,14 @@ struct ProbeState {
     sa_body: Vec<u8>,
     ke_data: Vec<u8>,
     nonce_data: Vec<u8>,
+    harvest: Option<HarvestState>,
+}
+
+struct HarvestState {
+    encryption: Ikev1EncryptionAlg,
+    key_length: Option<u16>,
+    dh_group: DhGroup,
+    hash_idx: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,12 +273,13 @@ impl Scanner {
     fn handle_recv(&self, data: &[u8], outstanding: &mut HashMap<u64, ProbeState>, host_results: &mut [HostResult], responded_count: &mut u64, hash_count: &mut u64, pb: &ProgressBar) -> Option<ProbeState> {
         let hdr = IkeHeader::parse(data)?;
         let probe = outstanding.remove(&hdr.initiator_spi)?;
-        let had_hash = host_results.get(probe.target_idx).is_some_and(|h| h.psk_hash.is_some());
+        let prev_hashes = host_results.get(probe.target_idx).map_or(0, |h| h.psk_hashes.len());
 
         let retry = self.process_response(&probe, data, host_results);
 
-        if !had_hash && host_results.get(probe.target_idx).is_some_and(|h| h.psk_hash.is_some()) {
-            *hash_count += 1;
+        let new_hashes = host_results.get(probe.target_idx).map_or(0, |h| h.psk_hashes.len());
+        if new_hashes > prev_hashes {
+            *hash_count += u64::try_from(new_hashes - prev_hashes).unwrap_or(1);
         }
 
         *responded_count += 1;
@@ -343,7 +352,7 @@ impl Scanner {
             ProbeKind::Ikev1MainMode => {
                 let transforms = default_ikev1_transforms();
                 let packet = v1msg::build_main_mode_msg1_with_vids(cookie, &transforms, vendor::DEFAULT_V1_VIDS);
-                ProbeState { target_idx, probe_type: kind, cookie, first_sent: now, last_sent: now, current_timeout: initial_timeout, retries_left: self.config.retries, retry_count: 0, packet, sa_body: Vec::new(), ke_data: Vec::new(), nonce_data: Vec::new() }
+                ProbeState { target_idx, probe_type: kind, cookie, first_sent: now, last_sent: now, current_timeout: initial_timeout, retries_left: self.config.retries, retry_count: 0, packet, sa_body: Vec::new(), ke_data: Vec::new(), nonce_data: Vec::new(), harvest: None }
             },
             ProbeKind::Ikev1AggressiveDh(dh_group) => {
                 let transforms = ikev1_transforms_for_groups(&[dh_group]);
@@ -357,7 +366,7 @@ impl Scanner {
                 let id_data = encode_id_data(self.config.id_type, &self.config.identity);
                 let packet = v1msg::build_aggressive_msg1(cookie, &transforms, &ke_data, &nonce_data, self.config.id_type, &id_data, vendor::DEFAULT_V1_VIDS);
 
-                ProbeState { target_idx, probe_type: kind, cookie, first_sent: now, last_sent: now, current_timeout: initial_timeout, retries_left: self.config.retries, retry_count: 0, packet, sa_body, ke_data, nonce_data }
+                ProbeState { target_idx, probe_type: kind, cookie, first_sent: now, last_sent: now, current_timeout: initial_timeout, retries_left: self.config.retries, retry_count: 0, packet, sa_body, ke_data, nonce_data, harvest: None }
             },
             ProbeKind::Ikev2SaInit => {
                 let proposals = default_ikev2_proposals();
@@ -369,7 +378,7 @@ impl Scanner {
 
                 let packet = v2msg::build_sa_init_request(cookie, &proposals, dh_group, &ke_data, &nonce_data, None);
 
-                ProbeState { target_idx, probe_type: kind, cookie, first_sent: now, last_sent: now, current_timeout: initial_timeout, retries_left: self.config.retries, retry_count: 0, packet, sa_body: Vec::new(), ke_data, nonce_data }
+                ProbeState { target_idx, probe_type: kind, cookie, first_sent: now, last_sent: now, current_timeout: initial_timeout, retries_left: self.config.retries, retry_count: 0, packet, sa_body: Vec::new(), ke_data, nonce_data, harvest: None }
             },
         }
     }
@@ -435,6 +444,9 @@ impl Scanner {
         let resp = Ikev1Response::parse(data)?;
 
         if resp.is_no_proposal_chosen() {
+            if probe.harvest.is_some() {
+                return self.next_harvest_probe(probe);
+            }
             return self.next_aggressive_dh_probe(probe);
         }
 
@@ -454,8 +466,17 @@ impl Scanner {
         } else {
             result.ikev1_result = Some(agg_result);
         }
+
         if self.config.extract_psk {
-            result.psk_hash = extract_psk_hash(probe, &resp);
+            if let Some(hash_result) = extract_psk_hash(probe, &resp) {
+                result.psk_hashes.push(hash_result);
+            }
+            if probe.harvest.is_some() {
+                return self.next_harvest_probe(probe);
+            }
+            if let Some(accepted) = resp.transforms.first() {
+                return self.start_harvest(probe, accepted);
+            }
         }
         None
     }
@@ -496,6 +517,7 @@ impl Scanner {
             sa_body,
             ke_data,
             nonce_data,
+            harvest: None,
         })
     }
 
@@ -524,6 +546,7 @@ impl Scanner {
                 sa_body: Vec::new(),
                 ke_data: probe.ke_data.clone(),
                 nonce_data: probe.nonce_data.clone(),
+                harvest: None,
             });
         }
 
@@ -559,6 +582,7 @@ impl Scanner {
                 sa_body: Vec::new(),
                 ke_data,
                 nonce_data,
+                harvest: None,
             });
         }
 
@@ -601,6 +625,7 @@ impl Scanner {
             sa_body: Vec::new(),
             ke_data: Vec::new(),
             nonce_data: Vec::new(),
+            harvest: None,
         })
     }
 
@@ -624,7 +649,54 @@ impl Scanner {
             sa_body: Vec::new(),
             ke_data: Vec::new(),
             nonce_data: Vec::new(),
+            harvest: None,
         }
+    }
+
+    fn start_harvest(&self, probe: &ProbeState, accepted: &Ikev1Transform) -> Option<ProbeState> {
+        let harvest = HarvestState { encryption: accepted.encryption, key_length: accepted.key_length, dh_group: accepted.dh_group, hash_idx: 0 };
+        self.build_harvest_probe(probe.target_idx, probe.first_sent, &harvest)
+    }
+
+    fn next_harvest_probe(&self, probe: &ProbeState) -> Option<ProbeState> {
+        let prev = probe.harvest.as_ref()?;
+        let harvest = HarvestState { encryption: prev.encryption, key_length: prev.key_length, dh_group: prev.dh_group, hash_idx: prev.hash_idx + 1 };
+        self.build_harvest_probe(probe.target_idx, probe.first_sent, &harvest)
+    }
+
+    fn build_harvest_probe(&self, target_idx: usize, first_sent: Instant, harvest: &HarvestState) -> Option<ProbeState> {
+        let all_hashes = Ikev1HashAlg::all();
+        let hash_alg = *all_hashes.get(harvest.hash_idx)?;
+        let ke_len = harvest.dh_group.ke_len()?;
+
+        let transform = Ikev1Transform { encryption: harvest.encryption, key_length: harvest.key_length, hash: hash_alg, auth_method: Ikev1AuthMethod::PreSharedKey, dh_group: harvest.dh_group, lifetime_secs: Some(28800) };
+
+        let mut rng = rand::rng();
+        let cookie: u64 = rng.random::<u64>() | 1;
+        let sa_body = ike_protocol::ikev1::sa::build_sa_body(&[transform]);
+        let mut ke_data = vec![0u8; ke_len];
+        rng.fill(ke_data.as_mut_slice());
+        let mut nonce_data = vec![0u8; 20];
+        rng.fill(nonce_data.as_mut_slice());
+        let id_data = encode_id_data(self.config.id_type, &self.config.identity);
+        let packet = v1msg::build_aggressive_msg1(cookie, &[transform], &ke_data, &nonce_data, self.config.id_type, &id_data, vendor::DEFAULT_V1_VIDS);
+        let now = Instant::now();
+
+        Some(ProbeState {
+            target_idx,
+            probe_type: ProbeKind::Ikev1AggressiveDh(harvest.dh_group),
+            cookie,
+            first_sent,
+            last_sent: now,
+            current_timeout: Duration::from_millis(self.config.timeout_ms),
+            retries_left: self.config.retries,
+            retry_count: 0,
+            packet,
+            sa_body,
+            ke_data,
+            nonce_data,
+            harvest: Some(HarvestState { encryption: harvest.encryption, key_length: harvest.key_length, dh_group: harvest.dh_group, hash_idx: harvest.hash_idx }),
+        })
     }
 }
 
@@ -633,7 +705,7 @@ impl Scanner {
 // ---------------------------------------------------------------------------
 
 fn init_host_results(targets: &[Target]) -> Vec<HostResult> {
-    targets.iter().map(|t| HostResult { target: t.clone(), responded: false, ikev1_result: None, ikev2_result: None, psk_hash: None, response_time_ms: None }).collect()
+    targets.iter().map(|t| HostResult { target: t.clone(), responded: false, ikev1_result: None, ikev2_result: None, psk_hashes: Vec::new(), response_time_ms: None }).collect()
 }
 
 fn create_progress_bar(total: usize, quiet: bool) -> ProgressBar {
