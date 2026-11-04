@@ -116,7 +116,6 @@ pub(crate) struct PskHashResult {
     pub(crate) hash_type: String,
     pub(crate) hashcat_mode: Option<u32>,
     pub(crate) hashcat_line: String,
-    pub(crate) psk_crack_line: String,
     pub(crate) warning: Option<String>,
 }
 
@@ -468,10 +467,10 @@ impl Scanner {
         }
 
         if self.config.extract_psk {
-            if let Some(hash_result) = extract_psk_hash(probe, &resp) {
-                result.psk_hashes.push(hash_result);
-            }
             if probe.harvest.is_some() {
+                if let Some(hash_result) = extract_psk_hash(probe, &resp) {
+                    result.psk_hashes.push(hash_result);
+                }
                 return self.next_harvest_probe(probe);
             }
             if let Some(accepted) = resp.transforms.first() {
@@ -891,7 +890,7 @@ fn extract_psk_hash(probe: &ProbeState, resp: &Ikev1Response) -> Option<PskHashR
         _ => None,
     };
 
-    Some(PskHashResult { hash_type: crack.hash_type().to_string(), hashcat_mode: crack.hash_type().hashcat_mode(), hashcat_line: crack.to_hashcat(), psk_crack_line: crack.to_psk_crack(), warning })
+    Some(PskHashResult { hash_type: crack.hash_type().to_string(), hashcat_mode: crack.hash_type().hashcat_mode(), hashcat_line: crack.to_hashcat(), warning })
 }
 
 // ---------------------------------------------------------------------------
