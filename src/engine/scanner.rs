@@ -8,6 +8,7 @@
 //! - IKEv2 COOKIE challenge: resend SA_INIT with cookie prepended (RFC 7296 section 2.6)
 //! - IKEv2 INVALID_KE_PAYLOAD: retry with the suggested DH group
 //! - IKEv1 NO_PROPOSAL_CHOSEN: probe individual transforms to enumerate accepted algorithms
+//! - IKEv1 BAD_PROPOSAL_SYNTAX: retry with a compact transform set (6 common suites)
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -17,6 +18,7 @@ use rand::RngExt;
 use serde::Serialize;
 use tokio::net::UdpSocket;
 
+use ike_protocol::attribute::{DataAttribute, v1_class};
 use ike_protocol::header::IkeHeader;
 use ike_protocol::ikev1::hash::PskCrackData;
 use ike_protocol::ikev1::message::{self as v1msg, Ikev1Response};
@@ -389,6 +391,12 @@ impl Scanner {
             return self.build_single_transform_probe(probe.target_idx, 0);
         }
 
+        if resp.is_bad_proposal_syntax() && probe.retry_count < MAX_PROTO_RETRIES {
+            tracing::debug!(target_idx = probe.target_idx, "v1 BAD_PROPOSAL_SYNTAX, retrying with compact transforms");
+            result.ikev1_result = Some(Ikev1HostResult { transforms: Vec::new(), vendor_ids: Vec::new(), notifications: resp.notifications.iter().map(|(t, d)| format_v1_notify(*t, d)).collect(), server_id: None, cert_request_count: resp.cert_requests.len(), nat_detected: !resp.nat_d.is_empty() });
+            return Some(self.build_compact_v1_probe(probe));
+        }
+
         let hr = ikev1_host_result(&resp);
         if let Some(ref existing) = result.ikev1_result {
             let mut merged = existing.clone();
@@ -583,6 +591,29 @@ impl Scanner {
             nonce_data: Vec::new(),
         })
     }
+
+    fn build_compact_v1_probe(&self, prev: &ProbeState) -> ProbeState {
+        let mut rng = rand::rng();
+        let cookie: u64 = rng.random::<u64>() | 1;
+        let transforms = compact_ikev1_transforms();
+        let packet = v1msg::build_main_mode_msg1_with_vids(cookie, &transforms, vendor::DEFAULT_V1_VIDS);
+        let now = Instant::now();
+
+        ProbeState {
+            target_idx: prev.target_idx,
+            probe_type: ProbeKind::Ikev1MainMode,
+            cookie,
+            first_sent: prev.first_sent,
+            last_sent: now,
+            current_timeout: Duration::from_millis(self.config.timeout_ms),
+            retries_left: self.config.retries,
+            retry_count: prev.retry_count + 1,
+            packet,
+            sa_body: Vec::new(),
+            ke_data: Vec::new(),
+            nonce_data: Vec::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -639,12 +670,84 @@ fn ikev1_host_result(resp: &Ikev1Response) -> Ikev1HostResult {
 
 fn format_v1_notify(notify_type: u16, data: &[u8]) -> String {
     let name = Ikev1NotifyType::from(notify_type);
-    if data.is_empty() { format!("{name}") } else { format!("{name} data={}", bytes_to_display(data)) }
+    if data.is_empty() {
+        return format!("{name}");
+    }
+    match notify_type {
+        14 => format_v1_notify_attributes(name, data),
+        _ => format!("{name} data={}", bytes_to_display(data)),
+    }
 }
 
 fn format_v2_notify(notify_type: u16, data: &[u8]) -> String {
     let name = Ikev2NotifyType::from(notify_type);
-    if data.is_empty() { format!("{name}") } else { format!("{name} data={}", bytes_to_display(data)) }
+    if data.is_empty() {
+        return format!("{name}");
+    }
+    match notify_type {
+        17 | 16388 | 16389 | 16390 => format!("{name}"),
+        16431 => format_v2_signature_hash_algorithms(data),
+        _ => format!("{name} data={}", bytes_to_display(data)),
+    }
+}
+
+fn format_v1_notify_attributes(name: Ikev1NotifyType, data: &[u8]) -> String {
+    let attrs = DataAttribute::parse_all(data);
+    if attrs.is_empty() {
+        return format!("{name} data={}", bytes_to_display(data));
+    }
+    let mut parts = Vec::new();
+    for attr in &attrs {
+        let label = match attr.attr_type() {
+            v1_class::ENCRYPTION => "Enc",
+            v1_class::HASH => "Hash",
+            v1_class::AUTH_METHOD => "Auth",
+            v1_class::GROUP_DESC => "DH",
+            v1_class::LIFE_TYPE => "LifeType",
+            v1_class::LIFE_DURATION => "LifeDuration",
+            v1_class::KEY_LENGTH => "KeyLen",
+            other => {
+                parts.push(format!("attr{other}={}", attr.as_short().unwrap_or(0)));
+                continue;
+            },
+        };
+        if let Some(val) = attr.as_short() {
+            let decoded = match attr.attr_type() {
+                v1_class::ENCRYPTION => Ikev1EncryptionAlg::from(val).to_string(),
+                v1_class::HASH => Ikev1HashAlg::from(val).to_string(),
+                v1_class::AUTH_METHOD => Ikev1AuthMethod::from(val).to_string(),
+                v1_class::GROUP_DESC => DhGroup::from(val).to_string(),
+                v1_class::LIFE_TYPE => match val {
+                    1 => "seconds".to_owned(),
+                    2 => "kilobytes".to_owned(),
+                    _ => val.to_string(),
+                },
+                _ => val.to_string(),
+            };
+            parts.push(format!("{label}={decoded}"));
+        } else {
+            parts.push(format!("{label}=<long>"));
+        }
+    }
+    format!("{name} ({})", parts.join(", "))
+}
+
+fn format_v2_signature_hash_algorithms(data: &[u8]) -> String {
+    let algos: Vec<&str> = data
+        .chunks_exact(2)
+        .filter_map(|c| {
+            let pair: &[u8; 2] = c.try_into().ok()?;
+            Some(match u16::from_be_bytes(*pair) {
+                1 => "SHA-1",
+                2 => "SHA-256",
+                3 => "SHA-384",
+                4 => "SHA-512",
+                5 => "Identity",
+                _ => "?",
+            })
+        })
+        .collect();
+    format!("SignatureHashAlgorithms: {}", algos.join(", "))
 }
 
 /// DH groups in aggressive mode walk order: most common first, then all others.
@@ -731,6 +834,19 @@ fn ikev1_transforms_for_groups(groups: &[DhGroup]) -> Vec<Ikev1Transform> {
 
 fn default_ikev1_transforms() -> Vec<Ikev1Transform> {
     ikev1_transforms_for_groups(&[DhGroup::Modp2048, DhGroup::Modp1024])
+}
+
+fn compact_ikev1_transforms() -> Vec<Ikev1Transform> {
+    let psk = Ikev1AuthMethod::PreSharedKey;
+    let lt = Some(28800);
+    vec![
+        Ikev1Transform { encryption: Ikev1EncryptionAlg::AesCbc, key_length: Some(256), hash: Ikev1HashAlg::Sha256, auth_method: psk, dh_group: DhGroup::Modp2048, lifetime_secs: lt },
+        Ikev1Transform { encryption: Ikev1EncryptionAlg::AesCbc, key_length: Some(256), hash: Ikev1HashAlg::Sha1, auth_method: psk, dh_group: DhGroup::Modp2048, lifetime_secs: lt },
+        Ikev1Transform { encryption: Ikev1EncryptionAlg::AesCbc, key_length: Some(128), hash: Ikev1HashAlg::Sha256, auth_method: psk, dh_group: DhGroup::Modp2048, lifetime_secs: lt },
+        Ikev1Transform { encryption: Ikev1EncryptionAlg::AesCbc, key_length: Some(128), hash: Ikev1HashAlg::Sha1, auth_method: psk, dh_group: DhGroup::Modp2048, lifetime_secs: lt },
+        Ikev1Transform { encryption: Ikev1EncryptionAlg::TripleDesCbc, key_length: None, hash: Ikev1HashAlg::Sha1, auth_method: psk, dh_group: DhGroup::Modp2048, lifetime_secs: lt },
+        Ikev1Transform { encryption: Ikev1EncryptionAlg::TripleDesCbc, key_length: None, hash: Ikev1HashAlg::Sha1, auth_method: psk, dh_group: DhGroup::Modp1024, lifetime_secs: lt },
+    ]
 }
 
 /// Generate IKEv2 proposals from the IANA registries — no hand-picked lists.

@@ -201,7 +201,13 @@ impl Ikev1Response {
     /// Get the NO-PROPOSAL-CHOSEN notification, if present.
     #[must_use]
     pub fn is_no_proposal_chosen(&self) -> bool {
-        self.notifications.iter().any(|(t, _)| *t == 14) // RFC 2408 section 3.14.1.
+        self.notifications.iter().any(|(t, _)| *t == 14)
+    }
+
+    /// Get the BAD-PROPOSAL-SYNTAX notification, if present.
+    #[must_use]
+    pub fn is_bad_proposal_syntax(&self) -> bool {
+        self.notifications.iter().any(|(t, _)| *t == 15)
     }
 
     /// Decode the responder's ID payload into a human-readable form.
