@@ -1,0 +1,18 @@
+[package]
+name = "ike-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust IKEv1/IKEv2 (ISAKMP) wire types: header, payloads, SA proposals, transforms, vendor IDs, and PSK hash extraction. No I/O, no async, no policy."
+keywords = ["ike", "ipsec", "isakmp", "protocol", "security"]
+categories = ["network-programming", "parser-implementations"]
+readme = "../../README.md"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

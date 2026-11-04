@@ -1,0 +1,38 @@
+[graph]
+all-features = true
+no-default-features = false
+
+[output]
+feature-depth = 3
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = []
+maximum-db-staleness = "P1D"
+git-fetch-with-cli = true
+unmaintained = "all"
+unsound = "all"
+unused-ignored-advisory = "deny"
+yanked = "deny"
+
+[licenses]
+allow = ["Apache-2.0", "MIT", "Unicode-3.0", "BSL-1.0", "MPL-2.0", "ISC"]
+unused-allowed-license = "deny"
+confidence-threshold = 0.95
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+
+skip = [
+  { crate = "syn@2", reason = "proc-macro crates have not all upgraded to syn 3" },
+]
+
+[[bans.deny]]
+crate = "openssl"
+wrappers = []
+
+[[bans.deny]]
+crate = "openssl-sys"

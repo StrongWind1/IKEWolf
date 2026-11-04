@@ -1,0 +1,192 @@
+# ---------------------------------------------------------------------------
+# Workspace -- two crates: the protocol library owns the IKE wire format,
+# the binary crate owns scanning policy, CLI, and output.
+#
+#   ike-protocol  -- IKEv1/IKEv2 wire types (RFC 2408/2409/7296)
+#   ikewolf       -- async UDP scanner, PSK extraction, fingerprinting
+#
+# See README.md for usage and architecture overview.
+# ---------------------------------------------------------------------------
+[workspace]
+members = [".", "crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+repository = "https://github.com/StrongWind1/IKEWolf"
+homepage = "https://github.com/StrongWind1/IKEWolf"
+readme = "README.md"
+
+[workspace.dependencies]
+ike-protocol = { version = "0.1.0", path = "crates/ike-protocol" }
+
+[package]
+name = "ikewolf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://github.com/StrongWind1/IKEWolf"
+description = "Pure-Rust IKE/IPsec security scanner: discovery, transform enumeration, vendor fingerprinting, and Aggressive Mode PSK hash extraction for authorized penetration testing."
+keywords = ["ike", "ipsec", "security", "pentest", "scanner"]
+categories = ["command-line-utilities", "network-programming"]
+readme.workspace = true
+include = [
+  "/src/**/*",
+  "/tests/**/*",
+  "/Cargo.toml",
+  "/Cargo.lock",
+  "/README.md",
+  "/LICENSE",
+  "/CHANGELOG.md",
+]
+
+[dependencies]
+ike-protocol = { workspace = true }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "time", "sync", "macros", "signal"] }
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indicatif = "0.18"
+colored = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+rand = "0.10"
+ipnet = "2"
+
+[dev-dependencies]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ikewolf"
+path = "src/main.rs"
+
+[profile.dev]
+overflow-checks = true
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"
+overflow-checks = true
+strip = "symbols"
+
+[profile.release-dev]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
+[profile.test]
+overflow-checks = true
+
+# Lint policy -- workspace-wide, all crates held to identical standards.
+# `.cargo/config.toml` adds `-D warnings`, so every "warn" is a hard failure.
+[workspace.lints.rust]
+arithmetic_overflow = "forbid"
+deref_nullptr = "forbid"
+invalid_atomic_ordering = "forbid"
+invalid_null_arguments = "forbid"
+invalid_reference_casting = "forbid"
+mutable_transmutes = "forbid"
+non_ascii_idents = "forbid"
+overflowing_literals = "forbid"
+text_direction_codepoint_in_comment = "forbid"
+text_direction_codepoint_in_literal = "forbid"
+unconditional_panic = "forbid"
+unused = { level = "deny", priority = -1 }
+unsafe_code = "deny"
+ambiguous_glob_imports = "forbid"
+let_underscore_lock = "forbid"
+absolute_paths_not_starting_with_crate = "warn"
+ambiguous_negative_literals = "warn"
+closure_returning_async_block = "warn"
+deprecated_in_future = "warn"
+elided_lifetimes_in_paths = "warn"
+explicit_outlives_requirements = "warn"
+keyword_idents_2018 = "warn"
+keyword_idents_2024 = "warn"
+let_underscore_drop = "warn"
+macro_use_extern_crate = "warn"
+meta_variable_misuse = "warn"
+missing_copy_implementations = "warn"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+missing_unsafe_on_extern = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+single_use_lifetimes = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unit_bindings = "warn"
+unreachable_pub = "warn"
+unused_crate_dependencies = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
+unused_results = "warn"
+variant_size_differences = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -2 }
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+restriction = { level = "allow", priority = -1 }
+nursery = { level = "allow", priority = -1 }
+dbg_macro = "deny"
+exit = "deny"
+mem_forget = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_in_result = "deny"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+cognitive_complexity = "warn"
+create_dir = "warn"
+empty_drop = "warn"
+expect_used = "warn"
+get_unwrap = "warn"
+indexing_slicing = "warn"
+large_include_file = "warn"
+missing_asserts_for_indexing = "warn"
+mixed_read_write_in_expression = "warn"
+multiple_unsafe_ops_per_block = "warn"
+mutex_atomic = "warn"
+mutex_integer = "warn"
+needless_raw_strings = "warn"
+non_zero_suggestions = "warn"
+panic = "warn"
+panic_in_result_fn = "warn"
+pathbuf_init_then_push = "warn"
+precedence_bits = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+renamed_function_params = "warn"
+str_to_string = "warn"
+string_lit_chars_any = "warn"
+suspicious_xor_used_as_pow = "warn"
+undocumented_unsafe_blocks = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+unused_result_ok = "warn"
+unwrap_used = "warn"
+wildcard_imports = "deny"
+use_self = "warn"
+multiple_crate_versions = "allow"
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
