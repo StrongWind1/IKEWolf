@@ -437,13 +437,13 @@ impl Scanner {
             result.ikev1_result = Some(hr);
         }
 
-        // For enumeration retries, continue with next transform.
+        // Continue enumeration: either continuing an in-progress walk, or
+        // starting one after the initial success to discover all accepted transforms.
         if probe.retry_count > 0 {
             let next_idx = usize::from(probe.retry_count);
             return self.build_single_transform_probe(probe.target_idx, next_idx);
         }
-
-        None
+        self.build_single_transform_probe(probe.target_idx, 0)
     }
 
     fn process_v1_aggressive(&self, probe: &ProbeState, data: &[u8], result: &mut HostResult) -> Option<ProbeState> {
