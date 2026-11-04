@@ -376,20 +376,22 @@ impl Scanner {
 
     fn process_response(&self, probe: &ProbeState, data: &[u8], results: &mut [HostResult]) -> Option<ProbeState> {
         let result = results.get_mut(probe.target_idx)?;
-        result.responded = true;
 
-        if self.config.show_backoff {
-            let elapsed_ms = u64::try_from(probe.first_sent.elapsed().as_millis()).unwrap_or(u64::MAX);
-            if result.response_time_ms.is_none() {
+        let retry = match probe.probe_type {
+            ProbeKind::Ikev1MainMode => self.process_v1_main(probe, data, result),
+            ProbeKind::Ikev1AggressiveDh(_) => self.process_v1_aggressive(probe, data, result),
+            ProbeKind::Ikev2SaInit => self.process_v2_init(probe, data, result),
+        };
+
+        if result.ikev1_result.is_some() || result.ikev2_result.is_some() {
+            result.responded = true;
+            if self.config.show_backoff && result.response_time_ms.is_none() {
+                let elapsed_ms = u64::try_from(probe.first_sent.elapsed().as_millis()).unwrap_or(u64::MAX);
                 result.response_time_ms = Some(elapsed_ms);
             }
         }
 
-        match probe.probe_type {
-            ProbeKind::Ikev1MainMode => self.process_v1_main(probe, data, result),
-            ProbeKind::Ikev1AggressiveDh(_) => self.process_v1_aggressive(probe, data, result),
-            ProbeKind::Ikev2SaInit => self.process_v2_init(probe, data, result),
-        }
+        retry
     }
 
     fn process_v1_main(&self, probe: &ProbeState, data: &[u8], result: &mut HostResult) -> Option<ProbeState> {
