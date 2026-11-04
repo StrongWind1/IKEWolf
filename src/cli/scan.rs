@@ -1,5 +1,6 @@
 //! `ikewolf scan` subcommand -- the primary scanning interface.
 
+use std::fmt::Write as _;
 use std::time::Instant;
 
 use clap::Args;
@@ -115,9 +116,17 @@ pub(crate) struct ScanArgs {
     #[arg(long, help_heading = H_IKE)]
     pub(crate) ikev2: bool,
 
-    /// Output in JSON format
-    #[arg(long, help_heading = H_OUTPUT)]
-    pub(crate) json: bool,
+    /// Write JSON results to FILE
+    #[arg(long, value_name = "FILE", help_heading = H_OUTPUT)]
+    pub(crate) json: Option<String>,
+
+    /// Write text results to FILE (in addition to stdout)
+    #[arg(short = 'o', long = "output", value_name = "FILE", help_heading = H_OUTPUT)]
+    pub(crate) output_file: Option<String>,
+
+    /// Write hashcat lines to FILE (format: ip:hash)
+    #[arg(long, value_name = "FILE", help_heading = H_OUTPUT)]
+    pub(crate) hashes: Option<String>,
 
     /// Show response timing for implementation fingerprinting
     #[arg(long, help_heading = H_OUTPUT)]
@@ -192,98 +201,133 @@ pub(crate) async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<
     let scanner = Scanner::new(config);
     let result = scanner.scan(&targets, globals.quiet).await?;
 
-    print_results(&result, &args, globals, start);
+    write_results(&result, &args, globals, start);
 
     Ok(())
 }
 
-/// Print scan results to stdout.
-fn print_results(result: &ScanOutput, args: &ScanArgs, globals: &GlobalOpts, start: Instant) {
-    if args.json {
-        let filtered = ScanOutput { hosts: result.hosts.iter().filter(|h| h.responded).cloned().collect(), interrupted: result.interrupted };
-        if let Ok(json) = serde_json::to_string_pretty(&filtered) {
-            println!("{json}");
-        }
-        return;
-    }
-
-    if globals.quiet {
-        return;
-    }
-
+fn format_text_results(result: &ScanOutput, args: &ScanArgs, start: Instant) -> String {
+    let mut out = String::new();
     let elapsed = start.elapsed();
     let responded = result.hosts.iter().filter(|h| h.responded).count();
 
-    output::status_ok(&format!("Scan complete: {responded}/{} responded in {:.2}s", result.hosts.len(), elapsed.as_secs_f64()));
+    let _ = writeln!(out, "Scan complete: {responded}/{} responded in {:.2}s", result.hosts.len(), elapsed.as_secs_f64());
 
     for host in &result.hosts {
         if !host.responded {
             continue;
         }
-        println!();
-        output::section_header(&host.target.to_string());
+        let _ = writeln!(out, "\n{}", host.target);
 
         if let Some(ref v1) = host.ikev1_result {
-            println!("  IKEv1: {}", if v1.transforms.is_empty() { "no proposal chosen" } else { "responded" });
+            let _ = writeln!(out, "  IKEv1: {}", if v1.transforms.is_empty() { "no proposal chosen" } else { "responded" });
             if let Some(ref id) = v1.server_id {
-                println!("    Server ID: {id}");
+                let _ = writeln!(out, "    Server ID: {id}");
             }
             for t in &v1.transforms {
-                println!("    Transform: {t}");
+                let _ = writeln!(out, "    Transform: {t}");
             }
             for vid in &v1.vendor_ids {
-                println!("    Vendor ID: {vid}");
+                let _ = writeln!(out, "    Vendor ID: {vid}");
             }
             for n in &v1.notifications {
-                println!("    Notify: {n}");
+                let _ = writeln!(out, "    Notify: {n}");
             }
             if v1.cert_request_count > 0 {
-                println!("    Certificate Requests: {}", v1.cert_request_count);
+                let _ = writeln!(out, "    Certificate Requests: {}", v1.cert_request_count);
             }
             if v1.nat_detected {
-                println!("    NAT-T: detected");
+                let _ = writeln!(out, "    NAT-T: detected");
             }
         }
 
         if let Some(ref v2) = host.ikev2_result {
-            println!("  IKEv2: {}", if v2.proposals.is_empty() { "no proposal chosen" } else { "responded" });
+            let _ = writeln!(out, "  IKEv2: {}", if v2.proposals.is_empty() { "no proposal chosen" } else { "responded" });
             if let Some(ref dh) = v2.dh_group {
-                println!("    DH Group: {dh}");
+                let _ = writeln!(out, "    DH Group: {dh}");
             }
             for p in &v2.proposals {
-                println!("    Proposal {}:", p.number);
+                let _ = writeln!(out, "    Proposal {}:", p.number);
                 for t in &p.transforms {
-                    println!("      {t}");
+                    let _ = writeln!(out, "      {t}");
                 }
             }
             for vid in &v2.vendor_ids {
-                println!("    Vendor ID: {vid}");
+                let _ = writeln!(out, "    Vendor ID: {vid}");
             }
             for n in &v2.notifications {
-                println!("    Notify: {n}");
+                let _ = writeln!(out, "    Notify: {n}");
             }
             if v2.cert_request_count > 0 {
-                println!("    Certificate Requests: {}", v2.cert_request_count);
+                let _ = writeln!(out, "    Certificate Requests: {}", v2.cert_request_count);
             }
         }
 
         if let Some(ref psk) = host.psk_hash {
-            println!("  PSK Hash ({}):", psk.hash_type);
-            println!("    hashcat: {}", psk.hashcat_line);
+            let _ = writeln!(out, "  PSK Hash ({}):", psk.hash_type);
+            let _ = writeln!(out, "    hashcat: {}", psk.hashcat_line);
             if let Some(ref warn) = psk.warning {
-                output::status_warn(warn);
+                let _ = writeln!(out, "    WARNING: {warn}");
             }
         }
 
         if args.show_backoff
             && let Some(ms) = host.response_time_ms
         {
-            println!("  Response time: {ms}ms");
+            let _ = writeln!(out, "  Response time: {ms}ms");
         }
     }
 
     if result.interrupted {
-        output::status_warn("Scan interrupted (partial results)");
+        let _ = writeln!(out, "Scan interrupted (partial results)");
+    }
+    out
+}
+
+fn write_results(result: &ScanOutput, args: &ScanArgs, globals: &GlobalOpts, start: Instant) {
+    if !globals.quiet {
+        let text = format_text_results(result, args, start);
+        output::status_ok(text.lines().next().unwrap_or("Scan complete"));
+        for line in text.lines().skip(1) {
+            println!("{line}");
+        }
+
+        if let Some(ref path) = args.output_file {
+            if let Err(e) = std::fs::write(path, &text) {
+                output::status_warn(&format!("cannot write {path}: {e}"));
+            } else {
+                output::status_ok(&format!("Text results written to {path}"));
+            }
+        }
+    }
+
+    if let Some(ref path) = args.json {
+        let filtered = ScanOutput { hosts: result.hosts.iter().filter(|h| h.responded).cloned().collect(), interrupted: result.interrupted };
+        match serde_json::to_string_pretty(&filtered) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(path, json) {
+                    output::status_warn(&format!("cannot write {path}: {e}"));
+                } else if !globals.quiet {
+                    output::status_ok(&format!("JSON results written to {path}"));
+                }
+            },
+            Err(e) => output::status_warn(&format!("JSON serialization failed: {e}")),
+        }
+    }
+
+    if let Some(ref path) = args.hashes {
+        let mut lines = String::new();
+        for host in &result.hosts {
+            if let Some(ref psk) = host.psk_hash {
+                let _ = writeln!(lines, "{}:{}", host.target.addr, psk.hashcat_line);
+            }
+        }
+        if let Err(e) = std::fs::write(path, &lines) {
+            output::status_warn(&format!("cannot write {path}: {e}"));
+        } else if !globals.quiet {
+            let count = lines.lines().count();
+            output::status_ok(&format!("{count} hash(es) written to {path}"));
+        }
     }
 }
 
@@ -309,7 +353,9 @@ mod tests {
             id_type: IdType::KeyId,
             ikev1: false,
             ikev2: false,
-            json: false,
+            json: None,
+            output_file: None,
+            hashes: None,
             show_backoff: false,
             quick: false,
         }

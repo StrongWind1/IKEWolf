@@ -30,6 +30,7 @@ pub(crate) fn status_err(msg: &str) {
 }
 
 /// Print a section header to stdout (result data, not status).
+#[expect(dead_code, reason = "used by future subcommands")]
 pub(crate) fn section_header(title: &str) {
     println!("{}", title.bold().underline());
 }

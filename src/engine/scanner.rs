@@ -210,6 +210,7 @@ impl Scanner {
         let mut retry_queue: Vec<ProbeState> = Vec::new();
         let mut queue_cursor = 0usize;
         let mut responded_count = 0u64;
+        let mut hash_count = 0u64;
         let min_interval = rate_interval(self.config.rate_pps);
         let mut last_send = Instant::now().checked_sub(min_interval).unwrap_or_else(Instant::now);
         let mut recv_buf = vec![0u8; 65535];
@@ -233,7 +234,7 @@ impl Scanner {
                         let retry = self.handle_recv(
                             recv_buf.get(..len).unwrap_or_default(),
                             &mut outstanding, host_results,
-                            &mut responded_count, pb,
+                            &mut responded_count, &mut hash_count, pb,
                         );
                         if let Some(retry_probe) = retry {
                             retry_queue.push(retry_probe);
@@ -261,15 +262,24 @@ impl Scanner {
         }
     }
 
-    fn handle_recv(&self, data: &[u8], outstanding: &mut HashMap<u64, ProbeState>, host_results: &mut [HostResult], responded_count: &mut u64, pb: &ProgressBar) -> Option<ProbeState> {
+    fn handle_recv(&self, data: &[u8], outstanding: &mut HashMap<u64, ProbeState>, host_results: &mut [HostResult], responded_count: &mut u64, hash_count: &mut u64, pb: &ProgressBar) -> Option<ProbeState> {
         let hdr = IkeHeader::parse(data)?;
         let probe = outstanding.remove(&hdr.initiator_spi)?;
+        let had_hash = host_results.get(probe.target_idx).is_some_and(|h| h.psk_hash.is_some());
 
         let retry = self.process_response(&probe, data, host_results);
 
+        if !had_hash && host_results.get(probe.target_idx).is_some_and(|h| h.psk_hash.is_some()) {
+            *hash_count += 1;
+        }
+
         *responded_count += 1;
         pb.inc(1);
-        pb.set_message(format!("{} responded", *responded_count));
+        if self.config.extract_psk {
+            pb.set_message(format!("{} responded, {} hashes", *responded_count, *hash_count));
+        } else {
+            pb.set_message(format!("{} responded", *responded_count));
+        }
         retry
     }
 
