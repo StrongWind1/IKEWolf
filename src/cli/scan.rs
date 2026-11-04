@@ -200,7 +200,8 @@ pub(crate) async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<
 /// Print scan results to stdout.
 fn print_results(result: &ScanOutput, args: &ScanArgs, globals: &GlobalOpts, start: Instant) {
     if args.json {
-        if let Ok(json) = serde_json::to_string_pretty(&result) {
+        let filtered = ScanOutput { hosts: result.hosts.iter().filter(|h| h.responded).cloned().collect(), interrupted: result.interrupted };
+        if let Ok(json) = serde_json::to_string_pretty(&filtered) {
             println!("{json}");
         }
         return;
