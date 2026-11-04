@@ -137,7 +137,10 @@ struct ProbeState {
     ke_data: Vec<u8>,
     nonce_data: Vec<u8>,
     harvest: Option<HarvestState>,
+    send_after: Option<Instant>,
 }
+
+const HARVEST_DELAY: Duration = Duration::from_millis(300);
 
 struct HarvestState {
     encryption: Ikev1EncryptionAlg,
@@ -318,6 +321,10 @@ impl Scanner {
         while outstanding.len() < self.config.concurrency && now.duration_since(*last_send) >= min_interval {
             // Retry probes take priority over new probes.
             let probe = if let Some(p) = retry_queue.pop() {
+                if p.send_after.is_some_and(|t| Instant::now() < t) {
+                    retry_queue.insert(0, p);
+                    break;
+                }
                 p
             } else if let Some(&(target_idx, probe_kind)) = probe_queue.get(*queue_cursor) {
                 *queue_cursor += 1;
@@ -351,7 +358,7 @@ impl Scanner {
             ProbeKind::Ikev1MainMode => {
                 let transforms = default_ikev1_transforms();
                 let packet = v1msg::build_main_mode_msg1_with_vids(cookie, &transforms, vendor::DEFAULT_V1_VIDS);
-                ProbeState { target_idx, probe_type: kind, cookie, first_sent: now, last_sent: now, current_timeout: initial_timeout, retries_left: self.config.retries, retry_count: 0, packet, sa_body: Vec::new(), ke_data: Vec::new(), nonce_data: Vec::new(), harvest: None }
+                ProbeState { target_idx, probe_type: kind, cookie, first_sent: now, last_sent: now, current_timeout: initial_timeout, retries_left: self.config.retries, retry_count: 0, packet, sa_body: Vec::new(), ke_data: Vec::new(), nonce_data: Vec::new(), harvest: None, send_after: None }
             },
             ProbeKind::Ikev1AggressiveDh(dh_group) => {
                 let transforms = ikev1_transforms_for_groups(&[dh_group]);
@@ -365,7 +372,7 @@ impl Scanner {
                 let id_data = encode_id_data(self.config.id_type, &self.config.identity);
                 let packet = v1msg::build_aggressive_msg1(cookie, &transforms, &ke_data, &nonce_data, self.config.id_type, &id_data, vendor::DEFAULT_V1_VIDS);
 
-                ProbeState { target_idx, probe_type: kind, cookie, first_sent: now, last_sent: now, current_timeout: initial_timeout, retries_left: self.config.retries, retry_count: 0, packet, sa_body, ke_data, nonce_data, harvest: None }
+                ProbeState { target_idx, probe_type: kind, cookie, first_sent: now, last_sent: now, current_timeout: initial_timeout, retries_left: self.config.retries, retry_count: 0, packet, sa_body, ke_data, nonce_data, harvest: None, send_after: None }
             },
             ProbeKind::Ikev2SaInit => {
                 let proposals = default_ikev2_proposals();
@@ -377,7 +384,7 @@ impl Scanner {
 
                 let packet = v2msg::build_sa_init_request(cookie, &proposals, dh_group, &ke_data, &nonce_data, None);
 
-                ProbeState { target_idx, probe_type: kind, cookie, first_sent: now, last_sent: now, current_timeout: initial_timeout, retries_left: self.config.retries, retry_count: 0, packet, sa_body: Vec::new(), ke_data, nonce_data, harvest: None }
+                ProbeState { target_idx, probe_type: kind, cookie, first_sent: now, last_sent: now, current_timeout: initial_timeout, retries_left: self.config.retries, retry_count: 0, packet, sa_body: Vec::new(), ke_data, nonce_data, harvest: None, send_after: None }
             },
         }
     }
@@ -517,6 +524,7 @@ impl Scanner {
             ke_data,
             nonce_data,
             harvest: None,
+            send_after: None,
         })
     }
 
@@ -546,6 +554,7 @@ impl Scanner {
                 ke_data: probe.ke_data.clone(),
                 nonce_data: probe.nonce_data.clone(),
                 harvest: None,
+                send_after: None,
             });
         }
 
@@ -582,6 +591,7 @@ impl Scanner {
                 ke_data,
                 nonce_data,
                 harvest: None,
+                send_after: None,
             });
         }
 
@@ -625,6 +635,7 @@ impl Scanner {
             ke_data: Vec::new(),
             nonce_data: Vec::new(),
             harvest: None,
+            send_after: None,
         })
     }
 
@@ -649,6 +660,7 @@ impl Scanner {
             ke_data: Vec::new(),
             nonce_data: Vec::new(),
             harvest: None,
+            send_after: None,
         }
     }
 
@@ -695,6 +707,7 @@ impl Scanner {
             ke_data,
             nonce_data,
             harvest: Some(HarvestState { encryption: harvest.encryption, key_length: harvest.key_length, dh_group: harvest.dh_group, hash_idx: harvest.hash_idx }),
+            send_after: Some(Instant::now() + HARVEST_DELAY),
         })
     }
 }
