@@ -1,10 +1,11 @@
 .PHONY: fmt fmt-fix lint lint-fix doc dev build check \
         test audit machete \
         hygiene check-all all \
-        build-linux-musl build-linux-arm-musl \
+        build-linux-x86-musl build-linux-x86-gnu \
+        build-linux-arm-musl build-linux-arm-gnu \
         build-macos-arm build-macos-x86 build-macos-universal \
-        build-windows \
-        dist size fix hooks clean
+        build-windows-x86-msvc build-windows-x86-gnu build-windows-arm-msvc \
+        dist dist-all size fix hooks clean
 
 # Default target.
 .PHONY: all
@@ -34,10 +35,13 @@ endif
 
 # -- Rust target triples --------------------------------------------------------
 TARGET_LINUX_X86_MUSL := x86_64-unknown-linux-musl
+TARGET_LINUX_X86_GNU  := x86_64-unknown-linux-gnu
 TARGET_LINUX_ARM_MUSL := aarch64-unknown-linux-musl
+TARGET_LINUX_ARM_GNU  := aarch64-unknown-linux-gnu
 TARGET_MACOS_ARM      := aarch64-apple-darwin
 TARGET_MACOS_X86      := x86_64-apple-darwin
 TARGET_WIN_X86_MSVC   := x86_64-pc-windows-msvc
+TARGET_WIN_X86_GNU    := x86_64-pc-windows-gnu
 TARGET_WIN_ARM_MSVC   := aarch64-pc-windows-msvc
 
 # -- Formatting ---------------------------------------------------------------
@@ -108,11 +112,17 @@ check-all: fmt lint check test doc hygiene machete
 
 # -- Cross-compilation --------------------------------------------------------
 
-build-linux-musl:
+build-linux-x86-musl:
 	$(CARGO) build --profile release --target $(TARGET_LINUX_X86_MUSL)
+
+build-linux-x86-gnu:
+	$(CARGO) build --profile release --target $(TARGET_LINUX_X86_GNU)
 
 build-linux-arm-musl:
 	$(CARGO) build --profile release --target $(TARGET_LINUX_ARM_MUSL)
+
+build-linux-arm-gnu:
+	$(CARGO) build --profile release --target $(TARGET_LINUX_ARM_GNU)
 
 build-macos-arm:
 	$(CARGO) build --profile release --target $(TARGET_MACOS_ARM)
@@ -127,11 +137,18 @@ build-macos-universal: build-macos-arm build-macos-x86
 		target/$(TARGET_MACOS_X86)/release/$(BIN) \
 		-output $(DIST)/$(BIN)-macos-universal
 
-build-windows:
+build-windows-x86-msvc:
 	$(CARGO) build --profile release --target $(TARGET_WIN_X86_MSVC)
+
+build-windows-x86-gnu:
+	$(CARGO) build --profile release --target $(TARGET_WIN_X86_GNU)
+
+build-windows-arm-msvc:
+	$(CARGO) build --profile release --target $(TARGET_WIN_ARM_MSVC)
 
 # -- Distribution artifacts ---------------------------------------------------
 
+# `make dist` builds for the current platform only.
 dist:
 ifeq ($(PLATFORM),linux)
 ifeq ($(ARCH),arm64)
@@ -139,17 +156,31 @@ ifeq ($(ARCH),arm64)
 	mkdir -p $(DIST)
 	cp target/$(TARGET_LINUX_ARM_MUSL)/release/$(BIN) $(DIST)/$(BIN)-linux-arm64
 else
-	$(MAKE) build-linux-musl
+	$(MAKE) build-linux-x86-musl
 	mkdir -p $(DIST)
 	cp target/$(TARGET_LINUX_X86_MUSL)/release/$(BIN) $(DIST)/$(BIN)-linux-x86_64
 endif
 else ifeq ($(PLATFORM),macos)
 	$(MAKE) build-macos-universal
 else
-	$(MAKE) build-windows
+	$(MAKE) build-windows-x86-msvc
 	mkdir -p $(DIST)
 	cp target/$(TARGET_WIN_X86_MSVC)/release/$(BIN).exe $(DIST)/$(BIN)-windows-x86_64.exe
 endif
+
+# `make dist-all` builds all 9 release targets (requires cross-compilation toolchains).
+dist-all: build-linux-x86-musl build-linux-x86-gnu build-linux-arm-musl build-linux-arm-gnu build-macos-arm build-macos-x86 build-windows-x86-msvc build-windows-x86-gnu build-windows-arm-msvc
+	mkdir -p $(DIST)
+	cp target/$(TARGET_LINUX_X86_MUSL)/release/$(BIN) $(DIST)/$(BIN)-linux-x86_64-musl
+	cp target/$(TARGET_LINUX_X86_GNU)/release/$(BIN) $(DIST)/$(BIN)-linux-x86_64-gnu
+	cp target/$(TARGET_LINUX_ARM_MUSL)/release/$(BIN) $(DIST)/$(BIN)-linux-arm64-musl
+	cp target/$(TARGET_LINUX_ARM_GNU)/release/$(BIN) $(DIST)/$(BIN)-linux-arm64-gnu
+	cp target/$(TARGET_MACOS_ARM)/release/$(BIN) $(DIST)/$(BIN)-macos-arm64
+	cp target/$(TARGET_MACOS_X86)/release/$(BIN) $(DIST)/$(BIN)-macos-x86_64
+	cp target/$(TARGET_WIN_X86_MSVC)/release/$(BIN).exe $(DIST)/$(BIN)-windows-x86_64.exe
+	cp target/$(TARGET_WIN_X86_GNU)/release/$(BIN).exe $(DIST)/$(BIN)-windows-x86_64-gnu.exe
+	cp target/$(TARGET_WIN_ARM_MSVC)/release/$(BIN).exe $(DIST)/$(BIN)-windows-arm64.exe
+	cd $(DIST) && sha256sum ./* > SHA256SUMS
 
 # -- Binary size report -------------------------------------------------------
 
