@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  build-linux-x86:
+  build-linux-x86-musl:
     name: Linux x86_64 (musl)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -23,6 +23,7 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
+          set -euo pipefail
           rustup show
           rustup target add x86_64-unknown-linux-musl
           sudo apt-get install -y musl-tools
@@ -33,10 +34,33 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: ikewolf-linux-x86_64
+          name: ikewolf-linux-x86_64-musl
           path: target/x86_64-unknown-linux-musl/release/ikewolf
 
-  build-linux-arm:
+  build-linux-x86-gnu:
+    name: Linux x86_64 (glibc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup show
+
+      - name: Build
+        run: cargo build --profile release --target x86_64-unknown-linux-gnu
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: ikewolf-linux-x86_64-gnu
+          path: target/x86_64-unknown-linux-gnu/release/ikewolf
+
+  build-linux-arm-musl:
     name: Linux ARM64 (musl)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
@@ -47,6 +71,7 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
+          set -euo pipefail
           rustup show
           rustup target add aarch64-unknown-linux-musl
           sudo apt-get install -y musl-tools
@@ -57,8 +82,31 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: ikewolf-linux-arm64
+          name: ikewolf-linux-arm64-musl
           path: target/aarch64-unknown-linux-musl/release/ikewolf
+
+  build-linux-arm-gnu:
+    name: Linux ARM64 (glibc)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup show
+
+      - name: Build
+        run: cargo build --profile release --target aarch64-unknown-linux-gnu
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: ikewolf-linux-arm64-gnu
+          path: target/aarch64-unknown-linux-gnu/release/ikewolf
 
   build-macos:
     name: macOS (${{ matrix.target }})
@@ -67,6 +115,39 @@ jobs:
     strategy:
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup show
+          rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --profile release --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: ikewolf-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/ikewolf
+
+  build-windows:
+    name: Windows (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            runner: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -83,33 +164,12 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: ikewolf-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/ikewolf
-
-  build-windows:
-    name: Windows x86_64
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        run: rustup show
-
-      - name: Build
-        run: cargo build --profile release --target x86_64-pc-windows-msvc
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        with:
-          name: ikewolf-windows-x86_64
-          path: target/x86_64-pc-windows-msvc/release/ikewolf.exe
+          name: ikewolf-windows-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/ikewolf.exe
 
   publish:
     name: Create Release
-    needs: [build-linux-x86, build-linux-arm, build-macos, build-windows]
+    needs: [build-linux-x86-musl, build-linux-x86-gnu, build-linux-arm-musl, build-linux-arm-gnu, build-macos, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -127,11 +187,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp artifacts/ikewolf-linux-x86_64/ikewolf dist/ikewolf-linux-x86_64
-          cp artifacts/ikewolf-linux-arm64/ikewolf dist/ikewolf-linux-arm64
+          cp artifacts/ikewolf-linux-x86_64-musl/ikewolf dist/ikewolf-linux-x86_64-musl
+          cp artifacts/ikewolf-linux-x86_64-gnu/ikewolf dist/ikewolf-linux-x86_64-gnu
+          cp artifacts/ikewolf-linux-arm64-musl/ikewolf dist/ikewolf-linux-arm64-musl
+          cp artifacts/ikewolf-linux-arm64-gnu/ikewolf dist/ikewolf-linux-arm64-gnu
           cp artifacts/ikewolf-aarch64-apple-darwin/ikewolf dist/ikewolf-macos-arm64
           cp artifacts/ikewolf-x86_64-apple-darwin/ikewolf dist/ikewolf-macos-x86_64
           cp artifacts/ikewolf-windows-x86_64/ikewolf.exe dist/ikewolf-windows-x86_64.exe
+          cp artifacts/ikewolf-windows-arm64/ikewolf.exe dist/ikewolf-windows-arm64.exe
           chmod +x dist/ikewolf-*
           cd dist && sha256sum ./* > SHA256SUMS
 
