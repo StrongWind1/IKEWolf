@@ -148,6 +148,9 @@ jobs:
           - arch: arm64
             target: aarch64-pc-windows-msvc
             runner: windows-latest
+          - arch: x86_64-gnu
+            target: x86_64-pc-windows-gnu
+            runner: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -195,6 +198,7 @@ jobs:
           cp artifacts/ikewolf-x86_64-apple-darwin/ikewolf dist/ikewolf-macos-x86_64
           cp artifacts/ikewolf-windows-x86_64/ikewolf.exe dist/ikewolf-windows-x86_64.exe
           cp artifacts/ikewolf-windows-arm64/ikewolf.exe dist/ikewolf-windows-arm64.exe
+          cp artifacts/ikewolf-windows-x86_64-gnu/ikewolf.exe dist/ikewolf-windows-x86_64-gnu.exe
           chmod +x dist/ikewolf-*
           cd dist && sha256sum ./* > SHA256SUMS
 
