@@ -80,8 +80,8 @@ pub(crate) struct ScanArgs {
     #[arg(long, default_value_t = 1.5, value_name = "MULT", help_heading = H_TIMING)]
     pub(crate) backoff: f64,
 
-    /// Maximum outstanding probes
-    #[arg(short = 'c', long, default_value_t = 256, value_name = "N", help_heading = H_TIMING)]
+    /// Maximum outstanding probes (0 = auto-detect from system limits)
+    #[arg(short = 'c', long, default_value_t = 0, value_name = "N", help_heading = H_TIMING)]
     pub(crate) concurrency: usize,
 
     /// Rate limit in packets per second (0 = unlimited)
@@ -177,7 +177,11 @@ pub(crate) async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<
     let specs = args.all_target_specs()?;
     let targets = target::parse_targets(&specs, args.port)?;
     if !globals.quiet {
-        output::status_info(&format!("Scanning {} target(s) on UDP/{}", targets.len(), args.port));
+        if args.concurrency == 0 {
+            output::status_info(&format!("Scanning {} target(s) on UDP/{}", targets.len(), args.port));
+        } else {
+            output::status_info(&format!("Scanning {} target(s) on UDP/{} (concurrency: {})", targets.len(), args.port, args.concurrency));
+        }
     }
 
     let config = ScanConfig {
@@ -198,7 +202,7 @@ pub(crate) async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<
         quick: args.quick,
     };
 
-    let scanner = Scanner::new(config);
+    let mut scanner = Scanner::new(config);
     let result = scanner.scan(&targets, globals.quiet).await?;
 
     write_results(&result, &args, globals, start);
@@ -211,7 +215,11 @@ fn format_text_results(result: &ScanOutput, args: &ScanArgs, start: Instant) -> 
     let elapsed = start.elapsed();
     let responded = result.hosts.len();
 
-    let _ = writeln!(out, "Scan complete: {responded}/{} responded in {:.2}s", result.total_targets, elapsed.as_secs_f64());
+    if args.concurrency == 0 {
+        let _ = writeln!(out, "Scan complete: {responded}/{} responded in {:.2}s (concurrency: {})", result.total_targets, elapsed.as_secs_f64(), result.concurrency);
+    } else {
+        let _ = writeln!(out, "Scan complete: {responded}/{} responded in {:.2}s", result.total_targets, elapsed.as_secs_f64());
+    }
 
     for host in &result.hosts {
         let _ = writeln!(out, "\n{}", host.target);

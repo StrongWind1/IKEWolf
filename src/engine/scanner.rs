@@ -67,6 +67,7 @@ pub(crate) struct ScanConfig {
 pub(crate) struct ScanOutput {
     pub(crate) hosts: Vec<HostResult>,
     pub(crate) total_targets: usize,
+    pub(crate) concurrency: usize,
     pub(crate) interrupted: bool,
 }
 
@@ -192,10 +193,12 @@ impl Scanner {
         Self { config }
     }
 
-    pub(crate) async fn scan(&self, targets: &[Target], quiet: bool) -> anyhow::Result<ScanOutput> {
-        tracing::info!(targets = targets.len(), timeout_ms = self.config.timeout_ms, retries = self.config.retries, concurrency = self.config.concurrency, rate_pps = self.config.rate_pps, "starting scan");
-
+    pub(crate) async fn scan(&mut self, targets: &[Target], quiet: bool) -> anyhow::Result<ScanOutput> {
         let socket = self.bind_socket(targets).await?;
+        if self.config.concurrency == 0 {
+            self.config.concurrency = auto_concurrency(&socket, targets.len());
+        }
+        tracing::info!(targets = targets.len(), timeout_ms = self.config.timeout_ms, retries = self.config.retries, concurrency = self.config.concurrency, rate_pps = self.config.rate_pps, "starting scan");
         let mut host_results: HashMap<usize, HostResult> = HashMap::new();
         let probe_queue = self.build_probe_queue(targets);
         let pb = create_progress_bar(probe_queue.len(), quiet);
@@ -208,14 +211,16 @@ impl Scanner {
         tracing::info!(responded, total = targets.len(), interrupted = loop_result, "scan complete");
 
         let hosts: Vec<HostResult> = host_results.into_values().collect();
-        Ok(ScanOutput { hosts, total_targets: targets.len(), interrupted: loop_result })
+        Ok(ScanOutput { hosts, total_targets: targets.len(), concurrency: self.config.concurrency, interrupted: loop_result })
     }
 
     async fn bind_socket(&self, targets: &[Target]) -> anyhow::Result<UdpSocket> {
         let port = self.config.source_port.unwrap_or(0);
         let has_ipv6 = targets.iter().any(|t| t.addr.is_ipv6());
         let bind_addr = if has_ipv6 { format!("[::]:{port}") } else { format!("0.0.0.0:{port}") };
-        Ok(UdpSocket::bind(&bind_addr).await?)
+        let socket = UdpSocket::bind(&bind_addr).await?;
+        maximize_recv_buffer(&socket);
+        Ok(socket)
     }
 
     fn build_probe_queue(&self, targets: &[Target]) -> ProbeQueue {
@@ -744,6 +749,39 @@ impl Scanner {
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+fn maximize_recv_buffer(socket: &UdpSocket) {
+    let rmem_max = read_sysctl("net.core.rmem_max").unwrap_or(212_992);
+    let target = rmem_max.max(4 * 1024 * 1024);
+    let sock_ref = socket2::SockRef::from(socket);
+    let mut size = target;
+    while size >= 212_992 {
+        if sock_ref.set_recv_buffer_size(size).is_ok() {
+            break;
+        }
+        size /= 2;
+    }
+    if let Ok(actual) = sock_ref.recv_buffer_size() {
+        tracing::debug!(recv_buffer = actual, "socket recv buffer");
+    }
+}
+
+fn auto_concurrency(socket: &UdpSocket, target_count: usize) -> usize {
+    let recv_buf = socket2::SockRef::from(socket).recv_buffer_size().unwrap_or(212_992);
+    let buf_based = recv_buf / 600;
+
+    let conntrack = read_sysctl("net.netfilter.nf_conntrack_max").unwrap_or(usize::MAX);
+    let conntrack_headroom = conntrack / 2;
+
+    let result = buf_based.min(conntrack_headroom).min(target_count).clamp(64, 16384);
+    tracing::info!(recv_buf, buf_based, conntrack, result, "auto-detected concurrency");
+    result
+}
+
+fn read_sysctl(name: &str) -> Option<usize> {
+    let path = format!("/proc/sys/{}", name.replace('.', "/"));
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
 
 fn create_progress_bar(total: usize, quiet: bool) -> ProgressBar {
     if quiet {
