@@ -201,13 +201,16 @@ impl Scanner {
     fn build_probe_queue(&self, targets: &[Target]) -> Vec<(usize, ProbeKind)> {
         let mut queue = Vec::new();
         for idx in 0..targets.len() {
+            if self.config.extract_psk && self.config.send_aggressive {
+                queue.push((idx, ProbeKind::Ikev1AggressiveDh(DhGroup::Modp2048)));
+            }
             if self.config.send_ikev1 {
                 queue.push((idx, ProbeKind::Ikev1MainMode));
             }
             if self.config.send_ikev2 {
                 queue.push((idx, ProbeKind::Ikev2SaInit));
             }
-            if self.config.send_aggressive {
+            if !self.config.extract_psk && self.config.send_aggressive {
                 queue.push((idx, ProbeKind::Ikev1AggressiveDh(DhGroup::Modp2048)));
             }
         }
