@@ -144,10 +144,8 @@ struct ProbeState {
 const HARVEST_DELAY: Duration = Duration::from_millis(300);
 
 struct HarvestState {
-    encryption: Ikev1EncryptionAlg,
-    key_length: Option<u16>,
-    dh_group: DhGroup,
-    hash_idx: usize,
+    transforms: Vec<Ikev1Transform>,
+    idx: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,10 +295,10 @@ impl Scanner {
 
     fn handle_recv(&self, data: &[u8], targets: &[Target], outstanding: &mut HashMap<u64, ProbeState>, host_results: &mut HashMap<usize, HostResult>, responded_count: &mut u64, hash_count: &mut u64, pb: &ProgressBar) -> Option<ProbeState> {
         let hdr = IkeHeader::parse(data)?;
-        let probe = outstanding.remove(&hdr.initiator_spi)?;
+        let mut probe = outstanding.remove(&hdr.initiator_spi)?;
         let prev_hashes = host_results.get(&probe.target_idx).map_or(0, |h| h.psk_hashes.len());
 
-        let retry = self.process_response(&probe, data, targets, host_results);
+        let retry = self.process_response(&mut probe, data, targets, host_results);
 
         let new_hashes = host_results.get(&probe.target_idx).map_or(0, |h| h.psk_hashes.len());
         if new_hashes > prev_hashes {
@@ -411,7 +409,7 @@ impl Scanner {
         }
     }
 
-    fn process_response(&self, probe: &ProbeState, data: &[u8], targets: &[Target], results: &mut HashMap<usize, HostResult>) -> Option<ProbeState> {
+    fn process_response(&self, probe: &mut ProbeState, data: &[u8], targets: &[Target], results: &mut HashMap<usize, HostResult>) -> Option<ProbeState> {
         let target = targets.get(probe.target_idx)?;
         let result = results.entry(probe.target_idx).or_insert_with(|| HostResult { target: target.clone(), responded: false, ikev1_result: None, ikev2_result: None, psk_hashes: Vec::new(), response_time_ms: None });
 
@@ -469,7 +467,7 @@ impl Scanner {
         self.build_single_transform_probe(probe.target_idx, 0)
     }
 
-    fn process_v1_aggressive(&self, probe: &ProbeState, data: &[u8], result: &mut HostResult) -> Option<ProbeState> {
+    fn process_v1_aggressive(&self, probe: &mut ProbeState, data: &[u8], result: &mut HostResult) -> Option<ProbeState> {
         let resp = Ikev1Response::parse(data)?;
 
         if resp.is_no_proposal_chosen() {
@@ -486,6 +484,11 @@ impl Scanner {
             }
             if agg_result.nat_detected {
                 existing.nat_detected = true;
+            }
+            for t in &agg_result.transforms {
+                if !existing.transforms.contains(t) {
+                    existing.transforms.push(t.clone());
+                }
             }
             for vid in &agg_result.vendor_ids {
                 if !existing.vendor_ids.contains(vid) {
@@ -687,23 +690,26 @@ impl Scanner {
         }
     }
 
-    fn start_harvest(&self, probe: &ProbeState, accepted: &Ikev1Transform) -> Option<ProbeState> {
-        let harvest = HarvestState { encryption: accepted.encryption, key_length: accepted.key_length, dh_group: accepted.dh_group, hash_idx: 0 };
-        self.build_harvest_probe(probe.target_idx, probe.first_sent, &harvest)
+    fn start_harvest(&self, probe: &ProbeState, _accepted: &Ikev1Transform) -> Option<ProbeState> {
+        let harvest = HarvestState { transforms: harvest_transforms(), idx: 0 };
+        self.build_harvest_probe(probe.target_idx, probe.first_sent, harvest)
     }
 
-    fn next_harvest_probe(&self, probe: &ProbeState) -> Option<ProbeState> {
-        let prev = probe.harvest.as_ref()?;
-        let harvest = HarvestState { encryption: prev.encryption, key_length: prev.key_length, dh_group: prev.dh_group, hash_idx: prev.hash_idx + 1 };
-        self.build_harvest_probe(probe.target_idx, probe.first_sent, &harvest)
+    fn next_harvest_probe(&self, probe: &mut ProbeState) -> Option<ProbeState> {
+        let prev = probe.harvest.take()?;
+        let mut harvest = HarvestState { transforms: prev.transforms, idx: prev.idx + 1 };
+        while harvest.idx < harvest.transforms.len() {
+            if harvest.transforms.get(harvest.idx).and_then(|t| t.dh_group.ke_len()).is_some() {
+                break;
+            }
+            harvest.idx += 1;
+        }
+        self.build_harvest_probe(probe.target_idx, probe.first_sent, harvest)
     }
 
-    fn build_harvest_probe(&self, target_idx: usize, first_sent: Instant, harvest: &HarvestState) -> Option<ProbeState> {
-        let all_hashes = Ikev1HashAlg::all();
-        let hash_alg = *all_hashes.get(harvest.hash_idx)?;
-        let ke_len = harvest.dh_group.ke_len()?;
-
-        let transform = Ikev1Transform { encryption: harvest.encryption, key_length: harvest.key_length, hash: hash_alg, auth_method: Ikev1AuthMethod::PreSharedKey, dh_group: harvest.dh_group, lifetime_secs: Some(28800) };
+    fn build_harvest_probe(&self, target_idx: usize, first_sent: Instant, harvest: HarvestState) -> Option<ProbeState> {
+        let transform = *harvest.transforms.get(harvest.idx)?;
+        let ke_len = transform.dh_group.ke_len()?;
 
         let mut rng = rand::rng();
         let cookie: u64 = rng.random::<u64>() | 1;
@@ -718,7 +724,7 @@ impl Scanner {
 
         Some(ProbeState {
             target_idx,
-            probe_type: ProbeKind::Ikev1AggressiveDh(harvest.dh_group),
+            probe_type: ProbeKind::Ikev1AggressiveDh(transform.dh_group),
             cookie,
             first_sent,
             last_sent: now,
@@ -729,7 +735,7 @@ impl Scanner {
             sa_body,
             ke_data,
             nonce_data,
-            harvest: Some(HarvestState { encryption: harvest.encryption, key_length: harvest.key_length, dh_group: harvest.dh_group, hash_idx: harvest.hash_idx }),
+            harvest: Some(harvest),
             send_after: Some(Instant::now() + HARVEST_DELAY),
         })
     }
@@ -949,6 +955,38 @@ fn ikev1_transforms_for_groups(groups: &[DhGroup]) -> Vec<Ikev1Transform> {
 
 fn default_ikev1_transforms() -> Vec<Ikev1Transform> {
     ikev1_transforms_for_groups(&[DhGroup::Modp2048, DhGroup::Modp1024])
+}
+
+/// All single-transform harvest probes, ordered with small DH groups first
+/// so that crackable hashes (msg_buf < 512 bytes) are collected early.
+fn harvest_transforms() -> Vec<Ikev1Transform> {
+    let psk = Ikev1AuthMethod::PreSharedKey;
+    let lt = Some(28800);
+    let dh_order = harvest_dh_order();
+    let mut transforms = Vec::new();
+    for &group in &dh_order {
+        for &enc in Ikev1EncryptionAlg::all() {
+            for &kl in enc.key_lengths() {
+                for &hash in Ikev1HashAlg::all() {
+                    transforms.push(Ikev1Transform { encryption: enc, key_length: kl, hash, auth_method: psk, dh_group: group, lifetime_secs: lt });
+                }
+            }
+        }
+    }
+    transforms
+}
+
+/// DH groups ordered smallest first for harvest — small groups produce hashes
+/// that fit within hashcat's 512-byte msg_buf limit.
+fn harvest_dh_order() -> Vec<DhGroup> {
+    let priority = [DhGroup::Modp768, DhGroup::Modp1024, DhGroup::Modp1536, DhGroup::Modp2048, DhGroup::Ecp256, DhGroup::Ecp384, DhGroup::Curve25519, DhGroup::Modp4096];
+    let mut result: Vec<DhGroup> = priority.to_vec();
+    for &g in DhGroup::all() {
+        if g.ke_len().is_some() && !result.contains(&g) {
+            result.push(g);
+        }
+    }
+    result
 }
 
 fn compact_ikev1_transforms() -> Vec<Ikev1Transform> {
