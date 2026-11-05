@@ -62,10 +62,11 @@ pub(crate) struct ScanConfig {
 // Output types
 // ---------------------------------------------------------------------------
 
-/// Output of a scan run.
+/// Output of a scan run (contains only hosts that responded).
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ScanOutput {
     pub(crate) hosts: Vec<HostResult>,
+    pub(crate) total_targets: usize,
     pub(crate) interrupted: bool,
 }
 
@@ -156,6 +157,26 @@ enum ProbeKind {
     Ikev2SaInit,
 }
 
+struct ProbeQueue {
+    num_targets: usize,
+    kinds: Vec<ProbeKind>,
+}
+
+impl ProbeQueue {
+    fn len(&self) -> usize {
+        self.num_targets * self.kinds.len()
+    }
+
+    fn get(&self, cursor: usize) -> Option<(usize, ProbeKind)> {
+        if cursor >= self.len() {
+            return None;
+        }
+        let target_idx = cursor / self.kinds.len();
+        let kind_idx = cursor % self.kinds.len();
+        self.kinds.get(kind_idx).map(|&kind| (target_idx, kind))
+    }
+}
+
 /// Max protocol-level retries (COOKIE + INVALID_KE, or v1 transform enumeration).
 const MAX_PROTO_RETRIES: u8 = 2;
 
@@ -177,7 +198,7 @@ impl Scanner {
         tracing::info!(targets = targets.len(), timeout_ms = self.config.timeout_ms, retries = self.config.retries, concurrency = self.config.concurrency, rate_pps = self.config.rate_pps, "starting scan");
 
         let socket = self.bind_socket(targets).await?;
-        let mut host_results = init_host_results(targets);
+        let mut host_results: HashMap<usize, HostResult> = HashMap::new();
         let probe_queue = self.build_probe_queue(targets);
         let pb = create_progress_bar(probe_queue.len(), quiet);
 
@@ -185,10 +206,11 @@ impl Scanner {
 
         pb.finish_and_clear();
 
-        let responded = host_results.iter().filter(|h| h.responded).count();
+        let responded = host_results.len();
         tracing::info!(responded, total = targets.len(), interrupted = loop_result, "scan complete");
 
-        Ok(ScanOutput { hosts: host_results, interrupted: loop_result })
+        let hosts: Vec<HostResult> = host_results.into_values().collect();
+        Ok(ScanOutput { hosts, total_targets: targets.len(), interrupted: loop_result })
     }
 
     async fn bind_socket(&self, targets: &[Target]) -> anyhow::Result<UdpSocket> {
@@ -198,27 +220,25 @@ impl Scanner {
         Ok(UdpSocket::bind(&bind_addr).await?)
     }
 
-    fn build_probe_queue(&self, targets: &[Target]) -> Vec<(usize, ProbeKind)> {
-        let mut queue = Vec::new();
-        for idx in 0..targets.len() {
-            if self.config.extract_psk && self.config.send_aggressive {
-                queue.push((idx, ProbeKind::Ikev1AggressiveDh(DhGroup::Modp2048)));
-            }
-            if self.config.send_ikev1 {
-                queue.push((idx, ProbeKind::Ikev1MainMode));
-            }
-            if self.config.send_ikev2 {
-                queue.push((idx, ProbeKind::Ikev2SaInit));
-            }
-            if !self.config.extract_psk && self.config.send_aggressive {
-                queue.push((idx, ProbeKind::Ikev1AggressiveDh(DhGroup::Modp2048)));
-            }
+    fn build_probe_queue(&self, targets: &[Target]) -> ProbeQueue {
+        let mut kinds = Vec::new();
+        if self.config.extract_psk && self.config.send_aggressive {
+            kinds.push(ProbeKind::Ikev1AggressiveDh(DhGroup::Modp2048));
         }
-        queue
+        if self.config.send_ikev1 {
+            kinds.push(ProbeKind::Ikev1MainMode);
+        }
+        if self.config.send_ikev2 {
+            kinds.push(ProbeKind::Ikev2SaInit);
+        }
+        if !self.config.extract_psk && self.config.send_aggressive {
+            kinds.push(ProbeKind::Ikev1AggressiveDh(DhGroup::Modp2048));
+        }
+        ProbeQueue { num_targets: targets.len(), kinds }
     }
 
     /// Returns `true` if interrupted by SIGINT.
-    async fn run_event_loop(&self, socket: &UdpSocket, targets: &[Target], host_results: &mut [HostResult], probe_queue: &[(usize, ProbeKind)], pb: &ProgressBar) -> bool {
+    async fn run_event_loop(&self, socket: &UdpSocket, targets: &[Target], host_results: &mut HashMap<usize, HostResult>, probe_queue: &ProbeQueue, pb: &ProgressBar) -> bool {
         let mut outstanding: HashMap<u64, ProbeState> = HashMap::new();
         let mut retry_queue: Vec<ProbeState> = Vec::new();
         let mut queue_cursor = 0usize;
@@ -246,7 +266,7 @@ impl Scanner {
                     if let Ok((len, _addr)) = result {
                         let retry = self.handle_recv(
                             recv_buf.get(..len).unwrap_or_default(),
-                            &mut outstanding, host_results,
+                            targets, &mut outstanding, host_results,
                             &mut responded_count, &mut hash_count, pb,
                         );
                         if let Some(retry_probe) = retry {
@@ -275,14 +295,14 @@ impl Scanner {
         }
     }
 
-    fn handle_recv(&self, data: &[u8], outstanding: &mut HashMap<u64, ProbeState>, host_results: &mut [HostResult], responded_count: &mut u64, hash_count: &mut u64, pb: &ProgressBar) -> Option<ProbeState> {
+    fn handle_recv(&self, data: &[u8], targets: &[Target], outstanding: &mut HashMap<u64, ProbeState>, host_results: &mut HashMap<usize, HostResult>, responded_count: &mut u64, hash_count: &mut u64, pb: &ProgressBar) -> Option<ProbeState> {
         let hdr = IkeHeader::parse(data)?;
         let probe = outstanding.remove(&hdr.initiator_spi)?;
-        let prev_hashes = host_results.get(probe.target_idx).map_or(0, |h| h.psk_hashes.len());
+        let prev_hashes = host_results.get(&probe.target_idx).map_or(0, |h| h.psk_hashes.len());
 
-        let retry = self.process_response(&probe, data, host_results);
+        let retry = self.process_response(&probe, data, targets, host_results);
 
-        let new_hashes = host_results.get(probe.target_idx).map_or(0, |h| h.psk_hashes.len());
+        let new_hashes = host_results.get(&probe.target_idx).map_or(0, |h| h.psk_hashes.len());
         if new_hashes > prev_hashes {
             *hash_count += u64::try_from(new_hashes - prev_hashes).unwrap_or(1);
         }
@@ -320,16 +340,15 @@ impl Scanner {
         }
     }
 
-    async fn send_probes(&self, socket: &UdpSocket, targets: &[Target], probe_queue: &[(usize, ProbeKind)], queue_cursor: &mut usize, outstanding: &mut HashMap<u64, ProbeState>, retry_queue: &mut Vec<ProbeState>, last_send: &mut Instant, min_interval: Duration, now: Instant, pb: &ProgressBar) {
+    async fn send_probes(&self, socket: &UdpSocket, targets: &[Target], probe_queue: &ProbeQueue, queue_cursor: &mut usize, outstanding: &mut HashMap<u64, ProbeState>, retry_queue: &mut Vec<ProbeState>, last_send: &mut Instant, min_interval: Duration, now: Instant, pb: &ProgressBar) {
         while outstanding.len() < self.config.concurrency && now.duration_since(*last_send) >= min_interval {
-            // Retry probes take priority over new probes.
             let probe = if let Some(p) = retry_queue.pop() {
                 if p.send_after.is_some_and(|t| Instant::now() < t) {
                     retry_queue.insert(0, p);
                     break;
                 }
                 p
-            } else if let Some(&(target_idx, probe_kind)) = probe_queue.get(*queue_cursor) {
+            } else if let Some((target_idx, probe_kind)) = probe_queue.get(*queue_cursor) {
                 *queue_cursor += 1;
                 self.build_probe(target_idx, probe_kind)
             } else {
@@ -392,8 +411,9 @@ impl Scanner {
         }
     }
 
-    fn process_response(&self, probe: &ProbeState, data: &[u8], results: &mut [HostResult]) -> Option<ProbeState> {
-        let result = results.get_mut(probe.target_idx)?;
+    fn process_response(&self, probe: &ProbeState, data: &[u8], targets: &[Target], results: &mut HashMap<usize, HostResult>) -> Option<ProbeState> {
+        let target = targets.get(probe.target_idx)?;
+        let result = results.entry(probe.target_idx).or_insert_with(|| HostResult { target: target.clone(), responded: false, ikev1_result: None, ikev2_result: None, psk_hashes: Vec::new(), response_time_ms: None });
 
         let retry = match probe.probe_type {
             ProbeKind::Ikev1MainMode => self.process_v1_main(probe, data, result),
@@ -718,10 +738,6 @@ impl Scanner {
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
-
-fn init_host_results(targets: &[Target]) -> Vec<HostResult> {
-    targets.iter().map(|t| HostResult { target: t.clone(), responded: false, ikev1_result: None, ikev2_result: None, psk_hashes: Vec::new(), response_time_ms: None }).collect()
-}
 
 fn create_progress_bar(total: usize, quiet: bool) -> ProgressBar {
     if quiet {

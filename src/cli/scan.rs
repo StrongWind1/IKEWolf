@@ -209,14 +209,11 @@ pub(crate) async fn run(args: ScanArgs, globals: &GlobalOpts) -> anyhow::Result<
 fn format_text_results(result: &ScanOutput, args: &ScanArgs, start: Instant) -> String {
     let mut out = String::new();
     let elapsed = start.elapsed();
-    let responded = result.hosts.iter().filter(|h| h.responded).count();
+    let responded = result.hosts.len();
 
-    let _ = writeln!(out, "Scan complete: {responded}/{} responded in {:.2}s", result.hosts.len(), elapsed.as_secs_f64());
+    let _ = writeln!(out, "Scan complete: {responded}/{} responded in {:.2}s", result.total_targets, elapsed.as_secs_f64());
 
     for host in &result.hosts {
-        if !host.responded {
-            continue;
-        }
         let _ = writeln!(out, "\n{}", host.target);
 
         if let Some(ref v1) = host.ikev1_result {
@@ -302,8 +299,7 @@ fn write_results(result: &ScanOutput, args: &ScanArgs, globals: &GlobalOpts, sta
     }
 
     if let Some(ref path) = args.json {
-        let filtered = ScanOutput { hosts: result.hosts.iter().filter(|h| h.responded).cloned().collect(), interrupted: result.interrupted };
-        match serde_json::to_string_pretty(&filtered) {
+        match serde_json::to_string_pretty(result) {
             Ok(json) => {
                 if let Err(e) = std::fs::write(path, json) {
                     output::status_warn(&format!("cannot write {path}: {e}"));
