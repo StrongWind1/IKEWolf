@@ -17,7 +17,7 @@ unused-ignored-advisory = "deny"
 yanked = "deny"
 
 [licenses]
-allow = ["Apache-2.0", "MIT", "Unicode-3.0", "BSL-1.0", "MPL-2.0", "ISC"]
+allow = ["Apache-2.0", "MIT", "Unicode-3.0", "MPL-2.0"]
 unused-allowed-license = "deny"
 confidence-threshold = 0.95
 
