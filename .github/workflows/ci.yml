@@ -190,11 +190,14 @@ jobs:
             ~/.cargo/registry/index/
           key: ubuntu-cargo-machete-v1
 
+      # cargo-machete needs a newer rustc than the pinned project toolchain,
+      # so build the tool with stable while the check itself runs on 1.95.
       - name: Install cargo-machete
         run: |
           set -euo pipefail
           if ! command -v cargo-machete > /dev/null 2>&1; then
-            cargo install cargo-machete --locked
+            rustup toolchain install stable --profile minimal
+            cargo +stable install cargo-machete --locked
           fi
 
       - name: cargo machete
